@@ -1,4 +1,4 @@
-obj-m += uio-vdw.o
+obj-m += uio_vdw.o
 SRC := $(shell pwd)
 
 all:
