@@ -54,8 +54,105 @@ typedef struct _vdw_uio_module {
 static vdw_uio_module module = { 0, 0 };
 
 static char *devregions = "-1,0,4096"; // default
+static char devregionsstorage[4096];
+static char *devadd = ""; // default
+static int devrm = -1; // default
 
+// forward declarations
+static int simpledriver_instance_remove(int instance);
+static int simpledriver_instance_add(const char* params);
+static int builddevregionsstring(void);
+
+/* module parameters are visible in /sys/module/uio_vdw/parameters
+ * and can be manipulated either at
+ * 1. insmod time: devregions
+ * 2. runtime: devregadd, devrm
+ */
+
+/*! "devregions" can be manipulated at module load
+ * @param devregions
+ * interruptnr,regaddress,regsize[,interruptnr,regaddress,regsize]
+ */
 module_param( devregions, charp, S_IRUGO);
+
+static int builddevregionsstring()
+{
+	vdw_uio_dev_priv_ptr uioinst = module.uioinst;
+	memset(devregionsstorage, 0, sizeof(devregionsstorage));
+	while (uioinst) {
+		sprintf(&devregionsstorage[strlen(devregionsstorage)], "%d,%lx,%u",
+				uioinst->irq, uioinst->regstart, uioinst->regsize);
+		uioinst = uioinst->pnext;
+		if (uioinst) {
+			strcat(devregionsstorage, ",");
+		}
+	}
+	devregions = devregionsstorage;
+	return 0;
+}
+
+/*! "devadd" can be manipulated at runtime
+ * @param devadd
+ * interruptnr,regaddress,regsize[,interruptnr,regaddress,regsize]
+ */
+static int param_set_devadd(const char *val, const struct kernel_param *kp)
+{
+	int ret = 0;
+	printk(KERN_INFO "param_set_devadd = %s\n", val?val:"NULL");
+	sscanf(val, "%d", &devrm);
+	ret = simpledriver_instance_add(val);
+	builddevregionsstring();
+	return ret;
+}
+
+static int param_get_devadd(char *buffer, const struct kernel_param *kp)
+{
+	int result = 0;
+	sprintf(buffer, "%d", module.instancecount);
+	printk(KERN_INFO "param_get_devadd = %s\n", buffer?buffer:"NULL");
+	result = strlen(buffer);
+	return result;
+}
+
+static struct kernel_param_ops param_ops_devadd = {
+ .set = param_set_devadd,
+ .get = param_get_devadd,
+};
+
+/*! "devrm" can be manipulated at runtime
+ * @param devrm
+ * index to remove
+ */
+module_param_cb(devadd, &param_ops_devadd, &devadd, (S_IRUSR|S_IWUSR));
+
+static int param_set_devrm(const char *val, const struct kernel_param *kp)
+{
+	int ret = 0;
+	printk(KERN_INFO "param_set_devrm = %s\n", val?val:"NULL");
+	sscanf(val, "%d", &devrm);
+	ret = simpledriver_instance_remove(devrm);
+	builddevregionsstring();
+	return ret;
+}
+
+static int param_get_devrm(char *buffer, const struct kernel_param *kp)
+{
+	int result = 0;
+	sprintf(buffer, "%d", module.instancecount);
+	printk(KERN_INFO "param_get_devrm = %s\n", buffer?buffer:"NULL");
+	result = strlen(buffer);
+	return result;
+}
+
+static struct kernel_param_ops param_ops_devrm = {
+ .set = param_set_devrm,
+ .get = param_get_devrm,
+};
+/*! "devrm" can be manipulated at runtime
+ * @param devrm
+ * index to remove
+ */
+module_param_cb(devrm, &param_ops_devrm, &devrm, (S_IRUSR|S_IWUSR));
 
 /* if one wants to do work in kernel space (interrupt), this is the place
  * to put the code...
@@ -102,7 +199,7 @@ module_platform_driver(vdw_driver);
 #if 0
 /* devicetree example */
 user_io@80000000 {
-    compatible = "vandewiele,vdw-uio";
+    compatible = "vandewiele,uio_vdw";
     regs = <0x20 0x80000000 0x0 0x1000>;
     clock = <&xclk 0>;
     interrupt-parent = <&L4>;
@@ -178,6 +275,47 @@ static void simpledriver_release(struct device *dev) {
 	printk(KERN_INFO "releasing vdw uio device\n");
 }
 
+static int simpledriver_instance_remove(int instance) {
+	int ret = -ENODEV;
+	int instanceiter = 0;
+	vdw_uio_dev_priv_ptr uioinst = module.uioinst;
+	vdw_uio_dev_priv_ptr uioinstnext = 0;
+	vdw_uio_dev_priv_ptr uioinstprev = 0;
+	printk( KERN_NOTICE "simpledriver_instance_remove begin, %d instances, remove %d\n",
+			module.instancecount, instance);
+	if (instance >= module.instancecount) {
+		printk( KERN_ERR "simpledriver_instance_remove, index %d out of bound!\n", instance);
+		goto exit_func;
+	}
+	while (uioinst && instanceiter < instance) {
+		uioinstnext = uioinst->pnext;
+		uioinstprev = uioinst;
+		uioinst = uioinstnext;
+		++instanceiter;
+	}
+	if (uioinst) {
+		printk(KERN_INFO "UnRegister UIO handler for IRQ=%d name=%s\n",
+				(int) uioinst->info.irq,
+				uioinst->info.name);
+		uioinstnext = uioinst->pnext;
+		uio_unregister_device(&uioinst->info);
+		device_unregister(&uioinst->dev);
+		kfree(uioinst->memalloc);
+		kfree(uioinst);
+		--module.instancecount;
+		if (uioinstprev) {
+			uioinstprev->pnext = uioinstnext;
+		}
+		else {
+			module.uioinst = uioinstnext;
+		}
+		ret = 0;
+	}
+	exit_func:
+	printk( KERN_NOTICE "simpledriver_instance_remove, %d instances left\n", module.instancecount);
+	return ret;
+}
+
 static int simpledriver_instance_init(int irq, uintptr_t regstart,
 	uint32_t regsize) {
 	int error = -1;
@@ -246,6 +384,10 @@ static int simpledriver_instance_init(int irq, uintptr_t regstart,
 	uiomem->name = kasprintf(GFP_KERNEL, "%s%s", uioinst->info.name, "_map0");
 	printk(KERN_INFO "uiomem->name = %s\n", uiomem->name);
 
+	uioinst->irq = irq;
+	uioinst->regstart = regstart;
+	uioinst->regsize = regsize;
+
 	if (!regstart) {
 		uioinst->memalloc = kzalloc(regsize, GFP_KERNEL | GFP_DMA);
 		printk(KERN_INFO "memalloc %px, pa=%px, size=%u bytes\n",
@@ -299,7 +441,8 @@ static int simpledriver_instance_init(int irq, uintptr_t regstart,
 	return error;
 }
 
-static int simpledriver_init(void) {
+static int simpledriver_instance_add(const char* params)
+{
 	int error = 0;
 	int irqparam;
 	uintptr_t regstartparam;
@@ -307,31 +450,45 @@ static int simpledriver_init(void) {
 	int sscanfret;
 	char reststring[256];
 
-	printk( KERN_NOTICE "vdw-driver init, regions (irq,start,size[,...]) = %s\n",
-			devregions?devregions:"NULL");
+	printk( KERN_NOTICE "vdw-driver simpledriver_instance_add, regions (irq,start,size[,...]) = %s\n",
+			params?params:"NULL");
+
+	if (!params || !strlen(params)) return -1;
 
 	memset(reststring, 0, sizeof(reststring));
-	strncpy(reststring, devregions, sizeof(reststring) - 1);
+	strncpy(reststring, params, sizeof(reststring) - 1);
 	do {
 		sscanfret = sscanf(reststring, "%d,%lx,%u%s", &irqparam, &regstartparam,
 				&regsizeparam, reststring);
 		printk(KERN_INFO "sscanfret %d, irqparam %d, regstartparam %lx, regsizeparam %u, rest = %s\r\n",
 				sscanfret, irqparam, regstartparam, regsizeparam, reststring);
+		error = -1;
+		if (sscanfret >= 3) {
+			error = simpledriver_instance_init(irqparam, regstartparam, regsizeparam);
+		}
+		if (error) { // either sscanf failed or instance_init
+			break;
+		}
 		if (reststring[0] == ',') {
 			memmove(reststring, reststring + 1, strlen(reststring));
 		}
-		error = simpledriver_instance_init(irqparam, regstartparam, regsizeparam);
-		if (error)
+		else { // no valid reststring
 			break;
+		}
 	} while (sscanfret > 3);
 
 	return error;
 }
 
+static int simpledriver_init(void) {
+	printk( KERN_NOTICE "vdw-driver init\n");
+	return simpledriver_instance_add(devregions);
+}
+
 static void simpledriver_exit(void) {
 	vdw_uio_dev_priv_ptr uioinst = module.uioinst;
 	vdw_uio_dev_priv_ptr uioinstnext;
-	printk( KERN_NOTICE "vdw-driver exit\n");
+	printk( KERN_NOTICE "vdw-driver exit begin, %d instances\n", module.instancecount);
 	while (uioinst) {
 		uioinstnext = uioinst->pnext;
 		printk(KERN_INFO "UnRegister UIO handler for IRQ=%d name=%s\n",
@@ -342,7 +499,9 @@ static void simpledriver_exit(void) {
 		kfree(uioinst->memalloc);
 		kfree(uioinst);
 		uioinst = uioinstnext;
+		--module.instancecount;
 	}
+	printk( KERN_NOTICE "vdw-driver exit done, %d instances\n", module.instancecount);
 }
 
 /* GBO: either use probe or this, not both */
